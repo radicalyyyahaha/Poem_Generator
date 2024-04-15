@@ -3,7 +3,6 @@ import requests
 import pandas as pd
 import matplotlib.pyplot as plt
 import math
-import tiktoken
 import torch
 import torch.nn as nn
 from transformers import BertTokenizer
@@ -19,7 +18,7 @@ dropout = 0.1
 num_epochs = 50000
 eval_intervals = 50 # How often to evaluate 
 eval_iters = 20 # How many iterations to average the loss over when evaluating the model
-device = 'mps' if torch.cuda.is_available() else 'cpu'
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 TORCH_SEED = 1557
 torch.manual_seed(TORCH_SEED)
@@ -32,12 +31,10 @@ class data:
 
     def getdata(self):
         if not os.path.exists("train-00000-of-00001-faeb732d85449c1e.parquet"):
-            # url = 'https://huggingface.co/datasets/chenqile09/tang-poems-with-keywords/resolve/main/data/train-00000-of-00001-faeb732d85449c1e.parquet'
             with open('train-00000-of-00001-faeb732d85449c1e.parquet', 'wb') as file:
                 file.write(requests.get(self.url1).content)
 
         if not os.path.exists("test-00000-of-00001-94055845bc0c7e5e.parquet"):
-            # url = 'https://huggingface.co/datasets/chenqile09/tang-poems-with-keywords/resolve/main/data/test-00000-of-00001-94055845bc0c7e5e.parquet'
             with open('test-00000-of-00001-94055845bc0c7e5e.parquet', 'wb') as file:
                 file.write(requests.get(self.url2).content)
 
@@ -70,28 +67,34 @@ class berfore:
         tokenizer = BertTokenizer.from_pretrained("bert-base-chinese")
         tokenized_text = tokenizer.tokenize(train)
         encoded_text = tokenizer.encode(tokenized_text, return_tensors="pt").float()
-        #print(len(tokenized_text))
-        #print(len(set(tokenized_text)))
-        #print(max(tokenized_text))
-        return encoded_text
+        #print(len(encoded_text[0]))
+        #print(encoded_text.size(1))
+        max_token = torch.max(encoded_text)
+        #print(int(max_token.item()))
+        vocab_size = tokenizer.vocab_size
+        #print(vocab_size)
+        return encoded_text, vocab_size, int(max_token.item())
     
     def split(self, encoded_text):
-        idx = int(len(encoded_text)*0.2)
-        train_data1 = encoded_text[:idx]
-        test_data = encoded_text[idx:]
+        idx = int(len(encoded_text[0]) * 0.2)
+        train_data1 = encoded_text[0][idx:]
+        test_data = encoded_text[0][:idx]
+        #print(train_data)
+        #print(train_data.size(0))
+        #print(test_data.size(0))
         return train_data1, test_data
     
-    def embedding(self, train_data1, encoded_text):
-        idxs = torch.randint(low=0, high=len(train_data1)-context_length, size=(batch_size, ))
+    def embedding(self, train_data1, max_token):
+        idxs = torch.randint(low=0, high=train_data1.size(0)-context_length, size=(batch_size, ))
 
         x_batch = torch.stack([train_data1[idx:idx + context_length] for idx in idxs])
         y_batch = torch.stack([train_data1[idx + 1:idx + context_length + 1] for idx in idxs])
         print(x_batch.shape, y_batch.shape)
 
-        token_embedding_lookup_table = nn.Embedding(max(encoded_text), d_model)
+        token_embedding_lookup_table = nn.Embedding(max_token, d_model)
 
-        X = token_embedding_lookup_table(x_batch)
-        Y = token_embedding_lookup_table(y_batch)
+        X = token_embedding_lookup_table(x_batch.long()).float()
+        Y = token_embedding_lookup_table(y_batch.long()).float()
         return X, Y
     
     def Position(self, X, Y):

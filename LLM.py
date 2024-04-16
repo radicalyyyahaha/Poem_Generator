@@ -8,7 +8,7 @@ import torch.nn as nn
 from transformers import BertTokenizer
 
 # Hyperparameters
-batch_size = 16
+batch_size = 4
 context_length = 16
 d_model = 128 # the vector size of the token embedding
 num_layers = 16 # num of Transformer blocks
@@ -18,7 +18,7 @@ dropout = 0.1
 num_epochs = 50000
 eval_intervals = 50 # How often to evaluate 
 eval_iters = 20 # How many iterations to average the loss over when evaluating the model
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
+device = 'mps' if torch.backends.mps.is_available() else 'cpu'
 
 TORCH_SEED = 1557
 torch.manual_seed(TORCH_SEED)
@@ -89,7 +89,7 @@ class berfore:
 
         x_batch = torch.stack([train_data1[idx:idx + context_length] for idx in idxs])
         y_batch = torch.stack([train_data1[idx + 1:idx + context_length + 1] for idx in idxs])
-        print(x_batch.shape, y_batch.shape)
+        #print(x_batch.shape, y_batch.shape)
 
         token_embedding_lookup_table = nn.Embedding(max_token, d_model)
 
@@ -113,10 +113,13 @@ class berfore:
         Y += position_embedding_lookup_table
         return X, Y
     
+    
 
-class Transformer_block:
-    def __init__(self, X) -> None:
+class Transformer_block(nn.Module):
+    def __init__(self, X, num_heads) -> None:
+        super(Transformer_block, self).__init__()
         self.X = X
+        self.num_heads = num_heads
 
     def mAttention(self):
         Wq = nn.Linear(d_model, d_model)
@@ -153,9 +156,10 @@ class Transformer_block:
         layer_norm = nn.LayerNorm(d_model)
         output1 = layer_norm(output)
         return output1
+    
 
     def FFN(self, output1):
-        output = nn.Linear(d_model, d_model * 4)(output)
+        output = nn.Linear(d_model, d_model * 4)(output1)
         output = nn.ReLU()(output)
         output = nn.Linear(d_model * 4, d_model)(output)
         output = torch.dropout(output, p=dropout, train=True)
@@ -166,34 +170,40 @@ class Transformer_block:
         return output2
     
 class TransformerModel(nn.Module):
-    def __init__(self, vocab_size, d_model, num_layers, num_heads, dropout):
+    def __init__(self, X, vocab_size, d_model, num_layers, num_heads, dropout) -> None:
         super(TransformerModel, self).__init__()
-        self.token_embedding = nn.Embedding(num_embeddings=vocab_size, embedding_dim=d_model)
-        self.position_embedding = nn.Embedding(num_embeddings=context_length, embedding_dim=d_model)
-        self.transformer_blocks = nn.ModuleList([Transformer_block(d_model) for _ in range(num_layers)])
-        self.output_layer = nn.Linear(in_features=d_model, out_features=vocab_size)
+        self.num_heads = num_heads
+        self.X = X
+        self.token_embedding_lookup_table = nn.Embedding(vocab_size, d_model)
+        self.position_embedding_lookup_table = torch.zeros(context_length, d_model)
+        self.position = torch.arange(0, context_length, dtype=torch.float).unsqueeze(1)
+        self.div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        self.position_embedding_lookup_table[:, 0::2] = torch.sin(self.position * self.div_term)
+        self.position_embedding_lookup_table[:, 1::2] = torch.cos(self.position * self.div_term)
+        self.position_embedding_lookup_table = self.position_embedding_lookup_table.unsqueeze(0).expand(batch_size, -1, -1)
+        self.transformer_blocks = nn.ModuleList([Transformer_block(X, self.num_heads) for _ in range(num_layers)])
+        self.linear = nn.Linear(d_model, vocab_size)
 
-    def forward(self, input_ids):
-        token_embeddings = self.token_embedding(input_ids)
-        position_ids = torch.arange(input_ids.size(1)).unsqueeze(0).to(input_ids.device)
-        position_embeddings = self.position_embedding(position_ids)
-        embeddings = token_embeddings + position_embeddings
-
+    def forward(self, X):
+        X = X.to(device)
+        X += self.position_embedding_lookup_table.to(device)
         for transformer_block in self.transformer_blocks:
-            embeddings = transformer_block(embeddings)
+            X = transformer_block.mAttention()
+            X = transformer_block.FFN(X)
 
-        logits = self.output_layer(embeddings)
-        return logits
+        X = self.linear(X)
+        return X
+
 
 data_obj = data(url1="https://huggingface.co/datasets/chenqile09/tang-poems-with-keywords/resolve/main/data/train-00000-of-00001-faeb732d85449c1e.parquet", 
                 url2="https://huggingface.co/datasets/chenqile09/tang-poems-with-keywords/resolve/main/data/test-00000-of-00001-94055845bc0c7e5e.parquet")
 train_data = data_obj.getdata()
-encoded_text = berfore().tokenization(train_data)
-train_data, test_data = berfore().split(encoded_text)
-X, Y = berfore().embedding(train_data, encoded_text)
+encoded_text, vocab_size, max_token = berfore().tokenization(train_data)
+train_data1, test_data = berfore().split(encoded_text)
+X, Y = berfore().embedding(train_data1, max_token)
 X, Y = berfore().Position(X, Y)
 
-model = TransformerModel(vocab_size=100000, d_model=d_model, num_layers=num_layers, num_heads=num_heads, dropout=dropout).to(device)
+model = TransformerModel(X, vocab_size, d_model=d_model, num_layers=num_layers, num_heads=num_heads, dropout=dropout).to(device)
 
 criterion = nn.CrossEntropyLoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=lr)
@@ -202,7 +212,7 @@ for epoch in range(num_epochs):
     model.train()
     total_loss = 0
 
-    for i in range(0, len(train_data) - batch_size + 1, batch_size):
+    for i in range(0, len(train_data1) - batch_size + 1, batch_size):
         optimizer.zero_grad()
 
         input_ids = X[i:i + batch_size].to(device)
@@ -210,7 +220,7 @@ for epoch in range(num_epochs):
 
         logits = model(input_ids)
 
-        loss = criterion(logits.view(-1, logits.size(-1)), target_ids.view(-1))
+        loss = criterion(logits.view(-1, logits.size(-1)), target_ids.view(-1)).to(device)
 
         loss.backward()
         optimizer.step()

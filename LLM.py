@@ -240,7 +240,7 @@ class TransformerModel(nn.Module):
         
         X = self.linear(X.to(device)).to(device)
         X = F.softmax(X, dim=-1)
-        print(f'X: {X.shape}')
+        #print(f'X: {X.shape}')
         return X
 
 
@@ -262,31 +262,36 @@ for epoch in range(num_epochs):
     total_loss = 0
 
     for i in range(0, len(train_data1) - batch_size + 1, batch_size):
-        optimizer.zero_grad()
+        
 
         input_ids = X[i:i + batch_size].to(device)
         target_ids = Y[i:i + batch_size].to(device)
 
-        linear = nn.Linear(d_model, vocab_size).to(device)
-
-        target_logits = linear(target_ids)
-        target_logits = F.softmax(target_logits, dim=-1)
-
+        #if i == 0:
+            #linear = nn.Linear(d_model, vocab_size).to(device)
+            #target_logits = linear(target_ids)
+            #target_logits = F.softmax(target_logits, dim=-1)
+        target_logits = model(target_ids)
         logits = model(input_ids)
 
-        print(f"logits: {logits.shape}, target_logits: {target_logits.shape}")
+        #print(f"logits: {logits.shape}, target_logits: {target_logits.shape}")
 
-        loss = criterion(logits.view(-1, logits.size(-1)), target_logits.view(-1)).to(device)
+        #print(f'logits: {logits.view(-1, logits.size(-1)).shape}, target_logits: {target_logits.view(-1).shape}')
 
-        loss.backward()
-        optimizer.step()
-
-        total_loss += loss.item()
+        loss = criterion(logits.view(-1, vocab_size), torch.argmax(target_logits.view(-1, vocab_size), dim=-1)).to(device)
 
         if i % eval_intervals == 0:
             avg_loss = total_loss / eval_iters
             print(f'Epoch [{epoch + 1}/{num_epochs}], Step [{i}/{len(train_data)}], Loss: {avg_loss:.4f}')
             total_loss = 0
+        
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        total_loss += loss.item()
+
+        
 
     if (epoch + 1) % 100 == 0:
         torch.save(model.state_dict(), f'trained_model_epoch_{epoch + 1}.pth')

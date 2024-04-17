@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 import math
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from transformers import BertTokenizer
 
 # Hyperparameters
@@ -18,7 +19,8 @@ dropout = 0.1
 num_epochs = 50000
 eval_intervals = 50 # How often to evaluate 
 eval_iters = 20 # How many iterations to average the loss over when evaluating the model
-device = 'mps' if torch.backends.mps.is_available() else 'cpu'
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+print(device)
 
 TORCH_SEED = 1557
 torch.manual_seed(TORCH_SEED)
@@ -149,12 +151,51 @@ class Transformer_block(nn.Module):
         # Define the output weight matrix
         Wo = nn.Linear(d_model, d_model)
         output = Wo(A) # [batch_size, context_length, d_model]
-        # print(output.shape)
+        #print(f'output:{output.shape}')
 
         # Residual
-        output += self.X
+        output += self.X        
         layer_norm = nn.LayerNorm(d_model)
         output1 = layer_norm(output)
+
+        #print("mAttention+Addnorm")
+        return output1
+    
+    def Attention(self):
+        Wq = nn.Linear(d_model, d_model)
+        Wk = nn.Linear(d_model, d_model)
+        Wv = nn.Linear(d_model, d_model)
+
+        Q = Wq(self.X) # [16, 16, 128]
+        Q = Q.view(batch_size, -1, num_heads, d_model // num_heads).transpose(1, 2) # [16, 16, 8, 16] transpose to [16, 8, 16, 16]
+
+        K = Wk(self.X) 
+        K = K.view(batch_size, -1, num_heads, d_model // num_heads).transpose(1, 2)
+
+        V = Wv(self.X) 
+        V = V.view(batch_size, -1, num_heads, d_model // num_heads).transpose(1, 2)
+
+        attention_score = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(d_model // num_heads)
+
+        # no Mask
+        #attention_score = attention_score.masked_fill(torch.triu(torch.ones(attention_score.shape[-2:]), diagonal=1).bool(), float('-inf'))
+
+        #softmax
+        attention_score = torch.softmax(attention_score, dim=-1)
+
+        # Calculate V Attention
+        A = torch.matmul(attention_score, V).transpose(1, 2).reshape(batch_size, -1, d_model) 
+
+        # Define the output weight matrix
+        Wo = nn.Linear(d_model, d_model)
+        output = Wo(A) # [batch_size, context_length, d_model]
+        #print(f'output:{output.shape}')
+
+        # Residual
+        output += self.X        
+        layer_norm = nn.LayerNorm(d_model)
+        output1 = layer_norm(output)
+        #print("Attention+Addnorm")
         return output1
     
 
@@ -167,31 +208,39 @@ class Transformer_block(nn.Module):
         output += output1
         layer_norm = nn.LayerNorm(d_model)
         output2 = layer_norm(output)
+        #print("FFN+Addnorm")
         return output2
     
 class TransformerModel(nn.Module):
-    def __init__(self, X, vocab_size, d_model, num_layers, num_heads, dropout) -> None:
+    def __init__(self, X, max_token, vocab_size, d_model, num_layers, num_heads, dropout) -> None:
         super(TransformerModel, self).__init__()
         self.num_heads = num_heads
         self.X = X
-        self.token_embedding_lookup_table = nn.Embedding(vocab_size, d_model)
-        self.position_embedding_lookup_table = torch.zeros(context_length, d_model)
-        self.position = torch.arange(0, context_length, dtype=torch.float).unsqueeze(1)
-        self.div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
-        self.position_embedding_lookup_table[:, 0::2] = torch.sin(self.position * self.div_term)
-        self.position_embedding_lookup_table[:, 1::2] = torch.cos(self.position * self.div_term)
-        self.position_embedding_lookup_table = self.position_embedding_lookup_table.unsqueeze(0).expand(batch_size, -1, -1)
+        #self.token_embedding_lookup_table = nn.Embedding(vocab_size, d_model)
+        #self.position_embedding_lookup_table = torch.zeros(context_length, d_model)
+        #self.position = torch.arange(0, context_length, dtype=torch.float).unsqueeze(1)
+        #self.div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        #self.position_embedding_lookup_table[:, 0::2] = torch.sin(self.position * self.div_term)
+        #self.position_embedding_lookup_table[:, 1::2] = torch.cos(self.position * self.div_term)
+        #self.position_embedding_lookup_table = self.position_embedding_lookup_table.unsqueeze(0).expand(batch_size, -1, -1)
         self.transformer_blocks = nn.ModuleList([Transformer_block(X, self.num_heads) for _ in range(num_layers)])
         self.linear = nn.Linear(d_model, vocab_size)
 
     def forward(self, X):
         X = X.to(device)
-        X += self.position_embedding_lookup_table.to(device)
-        for transformer_block in self.transformer_blocks:
+        # X += self.position_embedding_lookup_table.to(device)
+        #i = 1
+        for transformer_block in self.transformer_blocks: 
             X = transformer_block.mAttention()
-            X = transformer_block.FFN(X)
-
-        X = self.linear(X)
+            X = transformer_block.Attention()
+            X = transformer_block.FFN(X)   
+              
+            #print(f'Block {i} done')
+            #i += 1
+        
+        X = self.linear(X.to(device)).to(device)
+        X = F.softmax(X, dim=-1)
+        print(f'X: {X.shape}')
         return X
 
 
@@ -203,7 +252,7 @@ train_data1, test_data = berfore().split(encoded_text)
 X, Y = berfore().embedding(train_data1, max_token)
 X, Y = berfore().Position(X, Y)
 
-model = TransformerModel(X, vocab_size, d_model=d_model, num_layers=num_layers, num_heads=num_heads, dropout=dropout).to(device)
+model = TransformerModel(X, max_token, vocab_size, d_model=d_model, num_layers=num_layers, num_heads=num_heads, dropout=dropout).to(device)
 
 criterion = nn.CrossEntropyLoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=lr)
@@ -218,9 +267,16 @@ for epoch in range(num_epochs):
         input_ids = X[i:i + batch_size].to(device)
         target_ids = Y[i:i + batch_size].to(device)
 
+        linear = nn.Linear(d_model, vocab_size).to(device)
+
+        target_logits = linear(target_ids)
+        target_logits = F.softmax(target_logits, dim=-1)
+
         logits = model(input_ids)
 
-        loss = criterion(logits.view(-1, logits.size(-1)), target_ids.view(-1)).to(device)
+        print(f"logits: {logits.shape}, target_logits: {target_logits.shape}")
+
+        loss = criterion(logits.view(-1, logits.size(-1)), target_logits.view(-1)).to(device)
 
         loss.backward()
         optimizer.step()
